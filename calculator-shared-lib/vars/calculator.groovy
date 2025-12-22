@@ -1,22 +1,27 @@
-import com.company.utils.Email
 import com.company.utils.CalculatorUtils
+import com.company.utils.Email
 
-def add(a, b) {
-    CalculatorUtils.add(a as double, b as double)
+def call(String operation, a, b) {
+
+    switch (operation) {
+
+        case 'add':
+            return CalculatorUtils.add(a as double, b as double)
+
+        case 'sub':
+            return CalculatorUtils.subtract(a as double, b as double)
+
+        case 'mul':
+            return CalculatorUtils.multiply(a as double, b as double)
+
+        case 'div':
+            return CalculatorUtils.divide(a as double, b as double)
+
+        default:
+            error "Invalid operation: ${operation}"
+    }
 }
 
-def subtract(a, b) {
-    CalculatorUtils.subtract(a as double, b as double)
-}
-
-def multiply(a, b) {
-    CalculatorUtils.multiply(a as double, b as double)
-}
-
-def divide(a, b) {
-    CalculatorUtils.divide(a as double, b as double)
-}
-
-def notify(Boolean success, String recipient, String reportUrl = null) {
-    new Email(this).send(success, recipient, reportUrl)
+def notify(Boolean success, String recipient) {
+    new Email(this).send(success, recipient)
 }
