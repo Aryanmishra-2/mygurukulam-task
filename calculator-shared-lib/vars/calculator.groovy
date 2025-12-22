@@ -1,5 +1,5 @@
 
-import com.company.utils.CalculatorUtils
+import calculator-shared-lib.com.company.utils.CalculatorUtils
 
 def add(a, b) {
     return CalculatorUtils.add(a as double, b as double)
