@@ -2,23 +2,28 @@ package com.company.utils
 
 class CalculatorUtils implements Serializable {
 
-    static double add(double a, double b) {
+    static int add(int a, int b) {
         return a + b
     }
 
-    static double subtract(double a, double b) {
+    static int sub(int a, int b) {
         return a - b
     }
 
-    static double multiply(double a, double b) {
+    static int mul(int a, int b) {
         return a * b
     }
 
-    static double divide(double a, double b) {
+    static Map div(int a, int b) {
         if (b == 0) {
-            throw new IllegalArgumentException("Division by zero is not allowed")
+            return [
+                success: false,
+                message: "Division by zero is not allowed"
+            ]
         }
-        return a / b
+        return [
+            success: true,
+            value: a / b
+        ]
     }
 }
-
