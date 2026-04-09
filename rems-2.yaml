@@ -1,0 +1,587 @@
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Deploy Amazon EKS with VPC, NAT, ALB, Nodegroups, Bastion, S3, PostgreSQL RDS and Redis
+
+Parameters:
+
+  Region:
+    Type: String
+    Default: ap-south-1
+    AllowedValues:
+      - ap-south-1
+      - us-east-1
+      - us-west-2
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+
+  CreateNewVPC:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+
+  ExistingVpcId:
+    Type: String
+    Default: ""
+
+  ExistingVpcCidr:
+    Type: String
+    Default: ""
+
+  ExistingPublicSubnet1:
+    Type: String
+    Default: ""
+
+  ExistingPublicSubnet2:
+    Type: String
+    Default: ""
+
+  ExistingPrivateSubnet1:
+    Type: String
+    Default: ""
+
+  ExistingPrivateSubnet2:
+    Type: String
+    Default: ""
+
+  EKSVersion:
+    Type: String
+    Default: "1.30"
+    AllowedValues:
+      - "1.29"
+      - "1.30"
+      - "1.31"
+
+  BastionInstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+
+  BastionAmiId:
+    Type: AWS::EC2::Image::Id
+    Default: ami-0f5ee92e2d63afc18
+
+  NodeGroup1InstanceType:
+    Type: String
+    Default: c6i.large
+    AllowedValues:
+      - t3.medium
+      - t3.large
+      - m5.large
+      - m5.xlarge
+      - c6i.large
+      - c6i.xlarge
+
+  NodeGroup2InstanceType:
+    Type: String
+    Default: c6i.xlarge
+    AllowedValues:
+      - t3.medium
+      - t3.large
+      - m5.large
+      - m5.xlarge
+      - c6i.large
+      - c6i.xlarge
+
+  PostgresInstanceType:
+    Type: String
+    Default: db.t3.medium
+    AllowedValues:
+      - db.t3.micro
+      - db.t3.small
+      - db.t3.medium
+      - db.t3.large
+      - db.m6g.large
+      - db.m6g.xlarge
+
+  PostgresPassword:
+    Type: String
+    NoEcho: true
+
+  RedisNodeType:
+    Type: String
+    Default: cache.t3.micro
+    AllowedValues:
+      - cache.t3.micro
+      - cache.t3.small
+      - cache.t3.medium
+      - cache.m6g.large
+      - cache.m6g.xlarge
+
+Conditions:
+  CreateVPCCondition: !Equals [ !Ref CreateNewVPC, "true" ]
+
+Resources:
+
+# ---------------- VPC ----------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Condition: CreateVPCCondition
+    Properties:
+      CidrBlock: 10.0.0.0/18
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: Olly
+
+  IGW:
+    Type: AWS::EC2::InternetGateway
+    Condition: CreateVPCCondition
+
+  AttachIGW:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: CreateVPCCondition
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref IGW
+
+# ---------------- Subnets ----------------
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Condition: CreateVPCCondition
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Condition: CreateVPCCondition
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Condition: CreateVPCCondition
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Condition: CreateVPCCondition
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+
+# ---------------- ROUTING ----------------
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateVPCCondition
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Condition: CreateVPCCondition
+    DependsOn: AttachIGW
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IGW
+
+# ---------------- NAT ----------------
+  NatEIP:
+    Type: AWS::EC2::EIP
+    Condition: CreateVPCCondition
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Condition: CreateVPCCondition
+    DependsOn: AttachIGW
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateVPCCondition
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Condition: CreateVPCCondition
+    DependsOn: NatGateway
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVPCCondition
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVPCCondition
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVPCCondition
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVPCCondition
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+# ---------------- SECURITY ----------------
+  BastionSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Bastion SSH
+      VpcId: !If [CreateVPCCondition, !Ref VPC, !Ref ExistingVpcId]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB SG
+      VpcId: !If [CreateVPCCondition, !Ref VPC, !Ref ExistingVpcId]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  EKSClusterSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EKS SG
+      VpcId: !If [CreateVPCCondition, !Ref VPC, !Ref ExistingVpcId]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref BastionSG
+        - IpProtocol: -1
+          CidrIp: !If
+            - CreateVPCCondition
+            - 10.0.0.0/18
+            - !Ref ExistingVpcCidr
+
+  PostgresSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL access
+      VpcId: !If [CreateVPCCondition, !Ref VPC, !Ref ExistingVpcId]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref BastionSG
+
+  RedisSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Redis access
+      VpcId: !If [CreateVPCCondition, !Ref VPC, !Ref ExistingVpcId]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref BastionSG
+# ---------------- ALB ----------------
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: eks-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !If [CreateVPCCondition, !Ref PublicSubnet1, !Ref ExistingPublicSubnet1]
+        - !If [CreateVPCCondition, !Ref PublicSubnet2, !Ref ExistingPublicSubnet2]
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: eks-tg
+      Port: 80
+      Protocol: HTTP
+      VpcId: !If [CreateVPCCondition, !Ref VPC, !Ref ExistingVpcId]
+      TargetType: ip
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: ApplicationLoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  #---Postgres--------
+  PostgresSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnet group for PostgreSQL
+      SubnetIds:
+        - !If [CreateVPCCondition, !Ref PrivateSubnet1, !Ref ExistingPrivateSubnet1]
+        - !If [CreateVPCCondition, !Ref PrivateSubnet2, !Ref ExistingPrivateSubnet2]
+
+  PostgresDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: postgres-db
+      Engine: postgres
+      EngineVersion: "17.4"
+      DBInstanceClass: !Ref PostgresInstanceType
+      AllocatedStorage: 100
+      StorageType: gp3
+      MasterUsername: postgresadmin
+      MasterUserPassword: !Ref PostgresPassword
+      VPCSecurityGroups:
+        - !Ref PostgresSecurityGroup
+      DBSubnetGroupName: !Ref PostgresSubnetGroup
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 7
+      StorageEncrypted: true
+# ---------Redis--------------------
+  RedisSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: Redis subnet group
+      SubnetIds:
+        - !If [CreateVPCCondition, !Ref PrivateSubnet1, !Ref ExistingPrivateSubnet1]
+        - !If [CreateVPCCondition, !Ref PrivateSubnet2, !Ref ExistingPrivateSubnet2]
+
+  RedisCluster:
+    Type: AWS::ElastiCache::CacheCluster
+    Properties:
+      ClusterName: redis-cluster
+      Engine: redis
+      CacheNodeType: !Ref RedisNodeType
+      NumCacheNodes: 1
+      CacheSubnetGroupName: !Ref RedisSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref RedisSecurityGroup
+# ---------------- IAM (FIXED) ----------------
+  BastionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+
+  BastionInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref BastionRole]
+
+# ---------------- Bastion ----------------
+  BastionInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref BastionInstanceType
+      SubnetId: !If [CreateVPCCondition, !Ref PublicSubnet1, !Ref ExistingPublicSubnet1]
+      SecurityGroupIds: [!Ref BastionSG]
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref BastionInstanceProfile
+      ImageId: !Ref BastionAmiId
+      Tags:
+        - Key: Name
+          Value: Bastion-Host
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -xe
+
+          apt update -y
+          apt install -y unzip curl git jq docker.io
+
+          # Start Docker
+          systemctl start docker
+          systemctl enable docker
+          sudo usermod -aG docker ubuntu
+
+          # Install AWS CLI v2
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          ./aws/install
+
+          # Install kubectl
+          curl -LO "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          mv kubectl /usr/local/bin/
+
+          # Install Helm
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+          # Install eksctl
+          curl --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz
+          mv eksctl /usr/local/bin
+
+          # Configure kubeconfig for EKS
+          aws eks update-kubeconfig --region ${Region} --name ProdEKSCluster
+# ---------------- EKS ----------------
+  EKSClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: eks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  EKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: ProdEKSCluster
+      Version: !Ref EKSVersion
+      RoleArn: !GetAtt EKSClusterRole.Arn
+      ResourcesVpcConfig:
+        SubnetIds:
+          - !If [CreateVPCCondition, !Ref PrivateSubnet1, !Ref ExistingPrivateSubnet1]
+          - !If [CreateVPCCondition, !Ref PrivateSubnet2, !Ref ExistingPrivateSubnet2]
+        SecurityGroupIds:
+          - !Ref EKSClusterSG
+        EndpointPrivateAccess: true
+        EndpointPublicAccess: false
+
+# ---------------- NODE ROLE ----------------
+  NodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+# ---------------- NODE GROUP 1 ----------------
+  NodeGroup1:
+    Type: AWS::EKS::Nodegroup
+    DependsOn: EKSCluster
+    Properties:
+      ClusterName: !Ref EKSCluster
+      NodeRole: !GetAtt NodeRole.Arn
+      Subnets:
+        - !If [CreateVPCCondition, !Ref PrivateSubnet1, !Ref ExistingPrivateSubnet1]
+        - !If [CreateVPCCondition, !Ref PrivateSubnet2, !Ref ExistingPrivateSubnet2]
+      InstanceTypes: [!Ref NodeGroup1InstanceType]
+      LaunchTemplate:
+        Id: !Ref NodeLaunchTemplate1
+        Version: !GetAtt NodeLaunchTemplate1.LatestVersionNumber
+      ScalingConfig:
+        MinSize: 1
+        DesiredSize: 2
+        MaxSize: 5
+
+
+# ----------- EBS (NodeGroup1) ----------------
+  NodeLaunchTemplate1:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 50
+              VolumeType: gp3
+              Iops: 3000
+              Throughput: 125
+              DeleteOnTermination: true
+
+
+# ---------------- NODE GROUP 2 ----------------
+  NodeGroup2:
+    Type: AWS::EKS::Nodegroup
+    DependsOn: EKSCluster
+    Properties:
+      ClusterName: !Ref EKSCluster
+      NodeRole: !GetAtt NodeRole.Arn
+      Subnets:
+        - !If [CreateVPCCondition, !Ref PrivateSubnet1, !Ref ExistingPrivateSubnet1]
+        - !If [CreateVPCCondition, !Ref PrivateSubnet2, !Ref ExistingPrivateSubnet2]
+      InstanceTypes: [!Ref NodeGroup2InstanceType]
+      LaunchTemplate:
+        Id: !Ref NodeLaunchTemplate2
+        Version: !GetAtt NodeLaunchTemplate2.LatestVersionNumber
+      ScalingConfig:
+        MinSize: 1
+        DesiredSize: 2
+        MaxSize: 5
+
+
+# ----------- EBS (NodeGroup2) ----------------
+  NodeLaunchTemplate2:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 100
+              VolumeType: gp3
+              Iops: 4000
+              Throughput: 200
+              DeleteOnTermination: true
+# ---------------- ECR ----------------
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: eks-app-repository
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration:
+        EncryptionType: AES256
+
+# ---------------- S3 ----------------
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub eks-storages-${AWS::AccountId}-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
